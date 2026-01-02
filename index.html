@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FFmpeg 视频裁剪助手 (带时间轴)</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css" rel="stylesheet">
+    <style>
+        /* 全屏深色布局 */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background-color: #1a1a1a;
+            color: #efefef;
+        }
+
+        .app-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        /* 1. 顶部 Header */
+        header {
+            flex: 0 0 50px;
+            background-color: #252525;
+            border-bottom: 1px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 100;
+        }
+        h1 { margin: 0; font-size: 16px; font-weight: 500; color: #ddd; }
+        
+        .header-btn {
+            background: #3498db;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            border: none;
+        }
+        .header-btn:hover { background: #2980b9; }
+        input[type="file"] { display: none; }
+
+        /* 2. 中间画布 Stage */
+        #editor-stage {
+            flex: 1;
+            position: relative;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #666;
+            border: 2px dashed #444;
+            padding: 40px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .empty-state:hover { border-color: #888; }
+        
+        .img-container {
+            width: 100%;
+            height: 100%;
+            display: none; /* 初始隐藏 */
+        }
+        img { display: block; max-width: 100%; }
+
+        /* 加载遮罩 */
+        #loading-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 200;
+            display: none;
+        }
+        .spinner {
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            width: 30px; height: 30px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 3. 视频控制条 (新增) */
+        #video-controls {
+            flex: 0 0 40px;
+            background-color: #2d2d2d;
+            border-top: 1px solid #333;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            gap: 15px;
+            display: none; /* 默认隐藏，只有是视频时才显示 */
+        }
+        
+        .time-display {
+            font-family: monospace;
+            font-size: 12px;
+            color: #aaa;
+            min-width: 100px;
+        }
+
+        /* 自定义滑块样式 */
+        input[type=range] {
+            -webkit-appearance: none;
+            flex: 1;
+            background: transparent;
+            cursor: pointer;
+        }
+        input[type=range]:focus { outline: none; }
+        
+        /* 滑块轨道 */
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            background: #444;
+            border-radius: 3px;
+        }
+        /* 滑块按钮 */
+        input[type=range]::-webkit-slider-thumb {
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3498db;
+            -webkit-appearance: none;
+            margin-top: -5px; /* 居中 */
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        }
+
+        /* 4. 底部 Footer (指令区) */
+        footer {
+            flex: 0 0 60px;
+            background-color: #252525;
+            border-top: 1px solid #333;
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            gap: 15px;
+            z-index: 100;
+        }
+
+        .cmd-group { flex: 1; display: flex; gap: 10px; }
+        
+        input.cmd-input {
+            flex: 1;
+            background: #111;
+            border: 1px solid #444;
+            color: #50fa7b;
+            font-family: 'Consolas', monospace;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            outline: none;
+        }
+        
+        .info-text {
+            font-size: 12px; color: #888; text-align: right; min-width: 140px; line-height: 1.4;
+        }
+
+        .copy-btn {
+            background: #27ae60; color: white; border: none; padding: 0 20px;
+            border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px;
+        }
+        .copy-btn:hover { background: #219150; }
+
+    </style>
+</head>
+<body>
+
+<div class="app-container">
+    <header>
+        <h1>FFmpeg 裁剪助手</h1>
+        <div>
+            <label for="file-upload" class="header-btn">📂 导入文件</label>
+            <input id="file-upload" type="file" accept="image/*,video/*"/>
+        </div>
+    </header>
+
+    <div id="editor-stage">
+        <div class="empty-state" id="drop-zone" onclick="document.getElementById('file-upload').click()">
+            <div style="font-size: 40px; margin-bottom: 10px;">🎞️</div>
+            <p>点击上传 或 拖拽视频/图片</p>
+        </div>
+        
+        <div id="loading-overlay"><div class="spinner"></div></div>
+
+        <div class="img-container" id="img-wrapper">
+            <img id="image" src="" alt="Source">
+        </div>
+    </div>
+
+    <div id="video-controls">
+        <span class="time-display" id="current-time">00:00.0</span>
+        <input type="range" id="seek-bar" min="0" value="0" step="0.1">
+        <span class="time-display" id="total-duration" style="text-align: right;">00:00.0</span>
+    </div>
+
+    <footer>
+        <div class="info-text" id="resolution-info">等待导入...</div>
+        <div class="cmd-group">
+            <input type="text" class="cmd-input" id="ffmpeg-cmd" readonly placeholder="-vf 'crop=...'">
+            <button class="copy-btn" onclick="copyCommand()">复制</button>
+        </div>
+    </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+<script>
+    // DOM 元素引用
+    const els = {
+        fileInput: document.getElementById('file-upload'),
+        image: document.getElementById('image'),
+        imgWrapper: document.getElementById('img-wrapper'),
+        dropZone: document.getElementById('drop-zone'),
+        cmdInput: document.getElementById('ffmpeg-cmd'),
+        infoText: document.getElementById('resolution-info'),
+        loading: document.getElementById('loading-overlay'),
+        videoControls: document.getElementById('video-controls'),
+        seekBar: document.getElementById('seek-bar'),
+        currTime: document.getElementById('current-time'),
+        totalDur: document.getElementById('total-duration')
+    };
+
+    let cropper = null;
+    let activeVideo = null; // 保存当前的视频对象
+    let activeVideoUrl = null; // 保存视频的 Blob URL 用于清理
+
+    // --- 工具函数 ---
+    const formatTime = (seconds) => {
+        const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+        const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+        const ms = Math.floor((seconds % 1) * 10);
+        return `${m}:${s}.${ms}`;
+    };
+
+    function toggleLoading(show) {
+        els.loading.style.display = show ? 'flex' : 'none';
+    }
+
+    // --- 核心逻辑 ---
+
+    // 1. 处理文件入口
+    async function processFile(file) {
+        if (!file) return;
+        
+        // 清理旧资源
+        if (activeVideoUrl) {
+            URL.revokeObjectURL(activeVideoUrl);
+            activeVideo = null;
+            activeVideoUrl = null;
+        }
+        if (cropper) cropper.destroy();
+
+        toggleLoading(true);
+
+        try {
+            if (file.type.startsWith('video/')) {
+                // 处理视频
+                await initVideoMode(file);
+            } else if (file.type.startsWith('image/')) {
+                // 处理图片
+                await initImageMode(file);
+            } else {
+                alert('仅支持图片或视频文件');
+                toggleLoading(false);
+            }
+        } catch (e) {
+            console.error(e);
+            alert('加载失败: ' + e.message);
+            toggleLoading(false);
+        }
+    }
+
+    // 2. 视频模式初始化
+    async function initVideoMode(file) {
+        activeVideoUrl = URL.createObjectURL(file);
+        activeVideo = document.createElement('video');
+        activeVideo.src = activeVideoUrl;
+        activeVideo.muted = true;
+        activeVideo.playsInline = true;
+
+        // 等待元数据加载以获取时长和尺寸
+        await new Promise((resolve, reject) => {
+            activeVideo.onloadedmetadata = () => resolve();
+            activeVideo.onerror = () => reject(new Error('视频加载失败'));
+        });
+
+        // 设置UI
+        els.videoControls.style.display = 'flex';
+        els.seekBar.max = activeVideo.duration;
+        els.seekBar.value = 0;
+        els.totalDur.innerText = formatTime(activeVideo.duration);
+        els.dropZone.style.display = 'none';
+        els.imgWrapper.style.display = 'block';
+
+        // 提取第一帧并初始化 Cropper
+        const frameData = await extractFrame(0);
+        els.image.src = frameData;
+        
+        // 等待图片加载到 DOM
+        els.image.onload = () => {
+            initCropper();
+            toggleLoading(false);
+        };
+        
+        // 绑定滑块事件
+        setupVideoEvents();
+    }
+
+    // 3. 图片模式初始化
+    function initImageMode(file) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                els.videoControls.style.display = 'none'; // 隐藏视频控件
+                els.image.src = e.target.result;
+                els.dropZone.style.display = 'none';
+                els.imgWrapper.style.display = 'block';
+                
+                els.image.onload = () => {
+                    initCropper();
+                    toggleLoading(false);
+                    resolve();
+                };
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    // 4. 视频帧提取 (核心)
+    function extractFrame(time) {
+        return new Promise((resolve) => {
+            // 设置时间
+            activeVideo.currentTime = time;
+
+            // seeked 事件触发说明跳转完成，画面已更新
+            activeVideo.onseeked = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = activeVideo.videoWidth;
+                canvas.height = activeVideo.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(activeVideo, 0, 0, canvas.width, canvas.height);
+                // 转换为图片URL
+                resolve(canvas.toDataURL('image/jpeg', 0.8));
+            };
+            
+            // 如果已经在该时间点，手动触发
+            if (Math.abs(activeVideo.currentTime - time) < 0.1 && activeVideo.readyState >= 2) {
+                activeVideo.onseeked();
+            }
+        });
+    }
+
+    // 5. 视频滑块交互
+    function setupVideoEvents() {
+        els.seekBar.oninput = async (e) => {
+            const time = parseFloat(e.target.value);
+            els.currTime.innerText = formatTime(time);
+            
+            // 简单的防抖处理，防止拖动太快卡顿 (此处直接执行，现代浏览器大多能扛住)
+            if (activeVideo) {
+                const frameUrl = await extractFrame(time);
+                // 重点：replace(url, true) 第二个参数 true 保持裁剪框位置不变
+                if (cropper) {
+                    cropper.replace(frameUrl, true); 
+                }
+            }
+        };
+    }
+
+    // --- Cropper 相关 ---
+    function initCropper() {
+        if (cropper) cropper.destroy();
+        cropper = new Cropper(els.image, {
+            viewMode: 1,
+            dragMode: 'move',
+            autoCropArea: 0.8,
+            responsive: true,
+            background: false, // 自定义背景
+            checkCrossOrigin: false,
+            crop(event) { updateCmd(event.detail); },
+            ready() { updateCmd(this.cropper.getData(true)); }
+        });
+    }
+
+    function updateCmd(data) {
+        const w = Math.round(data.width);
+        const h = Math.round(data.height);
+        const x = Math.round(data.x);
+        const y = Math.round(data.y);
+        
+        // 获取原始分辨率
+        const imgData = cropper.getImageData();
+        const natW = Math.round(imgData.naturalWidth);
+        const natH = Math.round(imgData.naturalHeight);
+
+        els.cmdInput.value = `-vf 'crop=${w}:${h}:${x}:${y}'`;
+        els.infoText.innerHTML = `原分辨率: ${natW}x${natH}<br>保留尺寸: ${w}x${h}`;
+    }
+
+    // --- 全局交互 ---
+    function copyCommand() {
+        els.cmdInput.select();
+        document.execCommand('copy');
+        const btn = document.querySelector('.copy-btn');
+        const old = btn.innerText;
+        btn.innerText = "OK";
+        setTimeout(() => btn.innerText = old, 1000);
+    }
+
+    // 拖拽与粘贴
+    document.addEventListener('paste', (e) => {
+        const items = e.clipboardData.items;
+        for (let item of items) {
+            if (item.type.indexOf('image') !== -1) {
+                processFile(item.getAsFile());
+                break;
+            }
+        }
+    });
+
+    const stage = document.getElementById('editor-stage');
+    stage.addEventListener('dragover', (e) => { e.preventDefault(); els.dropZone.style.borderColor = '#3498db'; });
+    stage.addEventListener('dragleave', (e) => { e.preventDefault(); els.dropZone.style.borderColor = '#444'; });
+    stage.addEventListener('drop', (e) => { 
+        e.preventDefault(); 
+        els.dropZone.style.borderColor = '#444';
+        if(e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]);
+    });
+
+    els.fileInput.addEventListener('change', (e) => {
+        if(e.target.files.length) processFile(e.target.files[0]);
+        e.target.value = '';
+    });
+
+</script>
+</body>
+</html>
